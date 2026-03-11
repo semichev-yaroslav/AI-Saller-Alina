@@ -1,11 +1,13 @@
 import logging
+import re
+import time
 from dataclasses import dataclass
 
 from sqlalchemy.orm import Session
 
 from app.ai.analyzer import HeuristicLeadAnalyzer, LeadAnalyzer, build_default_analyzer, serialize_services_for_ai
 from app.ai.contracts import AnalyzerContext
-from app.ai.prompt_builder import PROMPT_VERSION, build_first_touch_intro
+from app.ai.prompt_builder import PROMPT_VERSION, build_first_touch_intro, build_start_funnel_intro
 from app.core.config import get_settings
 from app.core.enums import AIRunStatus, DeliveryStatus, IntentType, LeadStage, MessageChannel, MessageSource
 from app.db.models.message import Message
@@ -17,6 +19,8 @@ from app.services.contact_extractor import extract_contacts
 from app.services.stage_policy import LeadStagePolicy
 
 logger = logging.getLogger(__name__)
+START_COMMAND_PATTERN = re.compile(r"^/start(?:@[\w_]+)?(?:\s+.*)?$", flags=re.IGNORECASE)
+TELEGRAM_SEND_ATTEMPTS = 3
 
 
 class TelegramSender:
@@ -103,6 +107,13 @@ class MessageProcessor:
                 confidence=0.0,
                 reply_text="duplicate",
                 duplicate=True,
+            )
+
+        if self._is_start_command(dto.text):
+            return self._handle_start_scenario(
+                lead=lead,
+                incoming_message=incoming_message,
+                channel=dto.channel,
             )
 
         contacts = extract_contacts(dto.text)
@@ -209,15 +220,95 @@ class MessageProcessor:
         )
 
     def _send_to_telegram(self, chat_id: int, outgoing_message: Message) -> None:
-        try:
-            sent_message_id = self.telegram_sender.send_message(chat_id=chat_id, text=outgoing_message.text)
-            outgoing_message.telegram_message_id = sent_message_id
-            outgoing_message.delivery_status = DeliveryStatus.SENT
-            outgoing_message.delivery_error = None
-            self.db.commit()
-            logger.info("Telegram reply sent", extra={"chat_id": chat_id, "message_id": sent_message_id})
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("Telegram send failed")
-            outgoing_message.delivery_status = DeliveryStatus.FAILED
-            outgoing_message.delivery_error = str(exc)
-            self.db.commit()
+        last_error: Exception | None = None
+
+        for attempt in range(1, TELEGRAM_SEND_ATTEMPTS + 1):
+            try:
+                sent_message_id = self.telegram_sender.send_message(chat_id=chat_id, text=outgoing_message.text)
+                outgoing_message.telegram_message_id = sent_message_id
+                outgoing_message.delivery_status = DeliveryStatus.SENT
+                outgoing_message.delivery_error = None
+                self.db.commit()
+                logger.info(
+                    "Telegram reply sent",
+                    extra={"chat_id": chat_id, "message_id": sent_message_id, "attempt": attempt},
+                )
+                return
+            except Exception as exc:  # noqa: BLE001
+                last_error = exc
+                logger.warning(
+                    "Telegram send attempt failed",
+                    extra={"chat_id": chat_id, "attempt": attempt, "error": str(exc)},
+                )
+                if attempt < TELEGRAM_SEND_ATTEMPTS:
+                    time.sleep(0.4 * attempt)
+
+        logger.exception("Telegram send failed after retries", exc_info=last_error)
+        outgoing_message.delivery_status = DeliveryStatus.FAILED
+        outgoing_message.delivery_error = str(last_error) if last_error else "unknown send error"
+        self.db.commit()
+
+    def _is_start_command(self, text: str) -> bool:
+        return bool(START_COMMAND_PATTERN.match(text.strip()))
+
+    def _handle_start_scenario(
+        self,
+        *,
+        lead,
+        incoming_message: Message,
+        channel: MessageChannel,
+    ) -> ProcessResult:
+        services = self.services_repo.list_active()
+        reply_text = build_start_funnel_intro([srv.name for srv in services])
+
+        final_stage = LeadStagePolicy.resolve(current=lead.stage, proposed=LeadStage.ENGAGED)
+        lead.stage = final_stage
+        lead.last_intent = IntentType.GREETING
+
+        self.ai_runs_repo.create(
+            lead_id=lead.id,
+            input_message_id=incoming_message.id,
+            model="rule-start-v1",
+            prompt_version=f"{PROMPT_VERSION}-start",
+            intent=IntentType.GREETING,
+            predicted_stage=final_stage,
+            confidence=0.99,
+            reply_text=reply_text,
+            raw_response={
+                "provider": "rule_engine",
+                "scenario": "telegram_start",
+                "services_count": len(services),
+            },
+            latency_ms=0,
+            status=AIRunStatus.SUCCESS,
+            error_text=None,
+        )
+
+        outgoing_status = DeliveryStatus.SENT
+        if channel == MessageChannel.TELEGRAM and self.telegram_sender is not None:
+            outgoing_status = DeliveryStatus.PENDING
+
+        outgoing_message = self.messages_repo.create(
+            lead_id=lead.id,
+            source=MessageSource.ASSISTANT,
+            channel=channel,
+            text=reply_text,
+            delivery_status=outgoing_status,
+        )
+        self.db.commit()
+
+        if channel == MessageChannel.TELEGRAM and self.telegram_sender is not None:
+            self._send_to_telegram(lead.telegram_chat_id, outgoing_message)
+
+        logger.info("Start scenario processed", extra={"lead_id": lead.id, "stage": final_stage.value})
+
+        return ProcessResult(
+            lead_id=lead.id,
+            incoming_message_id=incoming_message.id,
+            outgoing_message_id=outgoing_message.id,
+            intent=IntentType.GREETING,
+            stage=final_stage,
+            confidence=0.99,
+            reply_text=reply_text,
+            duplicate=False,
+        )
