@@ -23,7 +23,7 @@ class DummyAnalyzer:
 def test_message_processor_creates_lead_extracts_contacts_and_prepends_intro(db_session) -> None:
     db_session.add(
         Service(
-            name="AI-бот для Telegram",
+            name="AI Saller Alina — AI-менеджер по продажам",
             description="Описание",
             price_from=Decimal("50000.00"),
             currency="RUB",
@@ -50,4 +50,4 @@ def test_message_processor_creates_lead_extracts_contacts_and_prepends_intro(db_
     assert lead.phone == "+79991234567"
     assert lead.email == "test@example.com"
     assert result.intent == IntentType.CONTACT_SHARING
-    assert "Я AI Sales Manager" in result.reply_text
+    assert "Я Алина" in result.reply_text

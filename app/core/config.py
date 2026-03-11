@@ -7,7 +7,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
-    app_name: str = "AI Sales Manager"
+    app_name: str = "AI Saller Alina"
     app_env: str = "dev"
     api_prefix: str = ""
     log_level: str = "INFO"
