@@ -5,6 +5,16 @@ Production-like backend-проект для портфолио AI Engineer / LLM
 `AI Saller Alina` автоматически обрабатывает входящие сообщения клиентов (Telegram/API), определяет `intent`, стадию лида, генерирует ответ через LLM и сохраняет полную историю диалога.
 Персона бота: Алина, менеджер по продажам по внедрению AI в бизнес-процессы.
 
+## Portfolio focus
+
+Этот репозиторий создан как инженерная демонстрация навыков программирования и AI-разработки:
+
+- проектирование backend-архитектуры (слои API/Service/Repository/Integrations);
+- production-like интеграция LLM в бизнес-логику;
+- работа с PostgreSQL, миграциями и моделями данных;
+- интеграция Telegram Bot API и внешних сервисов;
+- тестирование (unit + API), Docker и reproducible local setup.
+
 ## Возможности
 
 - Обработка входящих сообщений из Telegram (long polling) и через demo endpoint.
